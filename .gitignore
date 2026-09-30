@@ -7,6 +7,7 @@ NUL
 build/
 dist/
 dist_nuitka/
+GrindingStation*.exe
 __pycache__/
 *.pyc
 *.pyo

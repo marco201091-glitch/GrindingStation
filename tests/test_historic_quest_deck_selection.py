@@ -500,12 +500,13 @@ class PostLoginSelectionBookkeepingTests(_PostLoginTestBase):
             self.controller._historic_selection_key_for("RW", None),
         )
 
-    def test_legacy_unverified_navigation_leaves_it_unverified(self):
-        """The legacy image-only fallback asserts no screen it passes through."""
+    def test_failed_navigation_never_uses_legacy_templates_or_queues(self):
+        """Server-loading failures must be retried through the verified path."""
         self.nav_ok = False
-        self.assertTrue(self.run_routine())
-        self.assertEqual(self.clicked_decks, ["RW.png"])
-        self.assertTrue(self.play_pressed)
+        self.assertFalse(self.run_routine())
+        self.assertEqual(self.clicked_decks, [])
+        self.assertEqual(self.play_clicks, [])
+        self.assertFalse(self.play_pressed)
         self.assertIsNone(self.controller._historic_selection_key)
 
     def test_first_deck_fallback_leaves_it_unverified(self):

@@ -42,6 +42,8 @@ class ActionSpec:
     click_search_roi_rel: tuple[int, int, int, int] | None = None
     pre_assert_template: str | None = None
     pre_assert_roi_rel: tuple[int, int, int, int] | None = None
+    # A stale log scene may disagree with a visible, verified Home anchor.
+    allow_visual_state_override: bool = False
     post_expected_state: BotState | None = None
     post_assert_template: str | None = None
     post_assert_roi_rel: tuple[int, int, int, int] | None = None
@@ -120,9 +122,29 @@ def run_action(
         if spec.required_state is not None:
             cur_state = state_getter()
             if cur_state not in (spec.required_state, BotState.UNKNOWN):
-                if recover_once is not None:
-                    recover_once(spec.name, attempt)
-                continue
+                visual_home = (
+                    spec.allow_visual_state_override
+                    and spec.required_state == BotState.HOME
+                    and cur_state in (BotState.HISTORIC, BotState.MY_DECKS, BotState.PLAY_MENU)
+                    and spec.pre_assert_template is not None
+                    and spec.pre_assert_roi_rel is not None
+                    and os.path.exists(spec.pre_assert_template)
+                )
+                if visual_home:
+                    vision.begin_tick()
+                    visual_home = _assert_anchor(
+                        spec, vision, arena_region, spec.pre_assert_template,
+                        spec.pre_assert_roi_rel, "pre", on_diagnostic,
+                    )
+                if not visual_home:
+                    if recover_once is not None:
+                        recover_once(spec.name, attempt)
+                    continue
+                if on_diagnostic is not None:
+                    on_diagnostic(
+                        f"ACTION_STATE_STALE: {spec.name} log state={cur_state.value}; "
+                        "visible Home anchor verified."
+                    )
 
         # After the state gate, not before it: skipping is still a claim about
         # what is on screen, and it must not be reachable on a screen the action

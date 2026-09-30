@@ -25,6 +25,7 @@ regresses. Nothing here touches the screen.
 import os
 import sys
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -151,6 +152,46 @@ class HomeAnchorRoiTests(unittest.TestCase):
         self.assertTrue(result.ok, result.reason)
         self.assertEqual([c[2] for c in h.clicks], ["POST_LOGIN_PLAY"])
         self.assertEqual(h.recoveries, [])
+
+    def test_stale_historic_state_allows_visually_verified_home(self):
+        spec = replace(self.spec, skip_if_template=None, post_assert_template=None)
+        h = _Harness(self.frame, state=BotState.HISTORIC)
+        result = h.run(spec)
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual([c[2] for c in h.clicks], ["POST_LOGIN_PLAY"])
+        self.assertTrue(any("ACTION_STATE_STALE" in line for line in h.diagnostics))
+        self.assertEqual(h.recoveries, [])
+
+    def test_stale_state_without_home_anchor_does_not_click(self):
+        spec = replace(self.spec, skip_if_template=None, post_assert_template=None,
+                       max_retries=1)
+        frame = _frame_with((os.path.join(BUTTONS, "play_btn.png"), (1600, 900)))
+        h = _Harness(frame, state=BotState.HISTORIC)
+        result = h.run(spec)
+        self.assertFalse(result.ok)
+        self.assertEqual(h.clicks, [])
+
+    def test_in_game_state_never_uses_visual_override(self):
+        spec = replace(self.spec, skip_if_template=None, post_assert_template=None,
+                       max_retries=1)
+        h = _Harness(self.frame, state=BotState.IN_GAME)
+        result = h.run(spec)
+        self.assertFalse(result.ok)
+        self.assertEqual(h.clicks, [])
+
+    def test_stale_historic_state_allows_each_home_navigation_step(self):
+        frame = _frame_with((os.path.join(ASSETS, "home_anchor.png"),
+                             HOME_ANCHOR_TOPLEFT))
+        for base in _specs_by_name().values():
+            with self.subTest(step=base.name):
+                spec = replace(base, click_template=None, click_rel=(500, 500),
+                               skip_if_template=None, post_assert_template=None,
+                               optional=False, max_retries=1)
+                h = _Harness(frame, state=BotState.HISTORIC)
+                result = h.run(spec)
+                self.assertTrue(result.ok, result.reason)
+                self.assertEqual([c[2] for c in h.clicks], [base.name])
+                self.assertEqual(h.recoveries, [])
 
     def test_every_roi_contains_the_widget_it_searches_for(self):
         """Each ROI must contain where its template really is.
@@ -380,6 +421,7 @@ class PostAssertlessStepTests(unittest.TestCase):
 
     def _frame(self):
         return _frame_with(
+            (os.path.join(ASSETS, "home_anchor.png"), HOME_ANCHOR_TOPLEFT),
             (os.path.join(ASSETS, "nav", "nav_play_subtab.png"), (1678, 278)),
         )
 

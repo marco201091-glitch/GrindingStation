@@ -103,6 +103,7 @@ def build_post_login_navigation_actions(
             click_fallback_rel=home_play_point,
             pre_assert_template=a("home_anchor.png"),
             pre_assert_roi_rel=home_anchor_roi,
+            allow_visual_state_override=True,
             # The blade may already be open -- the Home Play button is then
             # partly covered (play_btn drops 0.954 -> 0.65) and clicking it again
             # would close the blade.
@@ -122,6 +123,9 @@ def build_post_login_navigation_actions(
             name="POST_LOGIN_FIND_MATCH",
             # The blade is not a scene, so the state here is still HOME.
             required_state=BotState.HOME,
+            pre_assert_template=a("home_anchor.png"),
+            pre_assert_roi_rel=home_anchor_roi,
+            allow_visual_state_override=True,
             click_template=b("find_match_btn.png"),
             click_search_roi_rel=blade_tabs_roi,
             # find_match_anchor.png is the Find Match panel header: 0.998 once the
@@ -133,6 +137,9 @@ def build_post_login_navigation_actions(
         ActionSpec(
             name="POST_LOGIN_PLAY_SUBTAB",
             required_state=BotState.HOME,
+            pre_assert_template=a("home_anchor.png"),
+            pre_assert_roi_rel=home_anchor_roi,
+            allow_visual_state_override=True,
             # Ranked / Play / Brawl. The format list (Standard, Alchemy, Historic
             # ...) only exists under Play, so if Historic Play is already listed
             # this step has nothing to do.
@@ -149,6 +156,9 @@ def build_post_login_navigation_actions(
         ActionSpec(
             name="POST_LOGIN_HIST_PLAY",
             required_state=BotState.HOME,
+            pre_assert_template=a("home_anchor.png"),
+            pre_assert_roi_rel=home_anchor_roi,
+            allow_visual_state_override=True,
             click_template=nav("nav_historic_play.png"),
             click_search_roi_rel=format_list_roi,
             # The row's label brightens once selected, so the click template drops
@@ -165,6 +175,9 @@ def build_post_login_navigation_actions(
         ActionSpec(
             name="POST_LOGIN_MY_DECKS",
             required_state=BotState.HOME,
+            pre_assert_template=a("home_anchor.png"),
+            pre_assert_roi_rel=home_anchor_roi,
+            allow_visual_state_override=True,
             click_template=nav("nav_my_decks.png"),
             click_search_roi_rel=decks_header_roi,
             # "My Decks" is a toggle and MTGA remembers it open between sessions:

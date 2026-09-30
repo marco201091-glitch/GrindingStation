@@ -49,6 +49,7 @@ class RerollCase(unittest.TestCase):
         c._update_gold_from_inventory = Mock()
         c._publish_account_switch_status = Mock()
         c._QUEST_REROLL_TIMEOUT = 0.04
+        c._QUEST_REROLL_UI_TIMEOUT = 0.02
         self.sleep = patch("Controller.MTGAController.quest_reroll.time.sleep")
         self.sleep.start()
         self.addCleanup(self.sleep.stop)
@@ -105,6 +106,87 @@ class SnapshotTests(RerollCase):
         self.assertIsNotNone(snapshot)
         self.assertIsNone(self.c._quest_reroll_data_floor)
         self.assertEqual(snapshot["quests"][0]["questId"], "new")
+
+
+class RerollRecoveryAndHistoryTests(RerollCase):
+    def setUp(self):
+        super().setUp()
+        self.history = Path(self.directory.name) / "quest_rerolls.txt"
+        p = patch("quest_reroll_history.history_path", return_value=self.history)
+        p.start()
+        self.addCleanup(p.stop)
+        self.c._current_account_screen_name = "TestAccount#1234"
+
+    def records(self):
+        return [json.loads(line.split(" | ", 1)[1])
+                for line in self.history.read_text(encoding="utf-8").splitlines()]
+
+    def confirm_replacement(self, x, y, tag):
+        if tag == "QUEST_REROLL_CONFIRM":
+            self.append([quest("replacement", 750)], canSwap=False)
+
+    def test_transient_tile_miss_retries_and_records_the_confirmed_quests(self):
+        c = self.c
+        self.append(canSwap=True)
+        c._find_500_gold_quest_tile.side_effect = [None, (825, 905)]
+        c._click_abs.side_effect = self.confirm_replacement
+        self.assertTrue(c.reroll_quest_on_landing())
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
+        records = self.records()
+        self.assertIn("retry", [r["outcome"] for r in records])
+        verified = [r for r in records if r["outcome"] == "verified"]
+        self.assertEqual(len(verified), 1)
+        self.assertEqual(verified[0]["account"], "TestAccount#1234")
+        self.assertEqual(verified[0]["before"][0]["id"], "old")
+        self.assertEqual(verified[0]["after"][0]["id"], "replacement")
+        self.assertEqual(verified[0]["after"][0]["gold"], 750)
+
+    def test_home_animation_failure_can_recover_before_any_click(self):
+        self.append(canSwap=True)
+        self.c._navigate_to_home.side_effect = [False, True]
+        self.c._click_abs.side_effect = self.confirm_replacement
+        self.assertTrue(self.c.reroll_quest_on_landing())
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
+
+    def test_delayed_fresh_snapshot_recovers_without_using_stale_quests(self):
+        responses = iter([None, True])
+        def freshen():
+            if next(responses) is None:
+                return None
+            return self.append(canSwap=True)
+        self.c._freshen_quest_reroll_snapshot.side_effect = freshen
+        self.c._click_abs.side_effect = self.confirm_replacement
+        self.assertTrue(self.c.reroll_quest_on_landing())
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
+
+    def test_animated_dialog_is_waited_for_without_reopening_it(self):
+        self.append(canSwap=True)
+        self.c._quest_reroll_dialog_visible.side_effect = [False, False, True]
+        self.c._click_abs.side_effect = self.confirm_replacement
+        self.assertTrue(self.c.reroll_quest_on_landing())
+        self.assertEqual(self.tags(), ["QUEST_REROLL_OPEN", "QUEST_REROLL_CONFIRM"])
+
+    def test_uncertain_confirmation_is_logged_but_never_retried(self):
+        self.append(canSwap=True)
+        def broken_click(x, y, tag):
+            if tag == "QUEST_REROLL_CONFIRM":
+                raise OSError("input delivery unknown")
+        self.c._click_abs.side_effect = broken_click
+        self.assertTrue(self.c.reroll_quest_on_landing())
+        self.c._quest_reroll_dialog_open = False
+        self.c.reroll_quest_on_landing()
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
+        outcomes = [r["outcome"] for r in self.records()]
+        self.assertIn("submit_attempt", outcomes)
+        self.assertNotIn("verified", outcomes)
+        self.assertNotIn("submitted", outcomes)
+
+    def test_logging_failure_does_not_repeat_a_successful_confirmation(self):
+        self.append(canSwap=True)
+        self.c._click_abs.side_effect = self.confirm_replacement
+        with patch("quest_reroll_history.record_event", side_effect=PermissionError("locked")):
+            self.assertTrue(self.c.reroll_quest_on_landing())
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
 
 
 class EligibilityTests(unittest.TestCase):
@@ -265,7 +347,8 @@ class LandingTests(RerollCase):
 
         self.assertTrue(c._run_post_login_routine({"name": "incoming"}, []))
 
-        self.assertEqual(c._quest_reroll_home_visible.call_count, 2)
+        self.assertEqual(c._find_500_gold_quest_tile.call_count, 3)
+        self.assertEqual(c._quest_reroll_home_visible.call_count, 6)
         c._run_post_login_navigation_oob.assert_called_once()
         c._choose_deck_image.assert_called_once_with({"name": "incoming"}, "", None)
         self.assertEqual(

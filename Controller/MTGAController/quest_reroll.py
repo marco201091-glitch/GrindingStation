@@ -12,6 +12,7 @@ import time
 
 import bot_logger
 import runtime_status
+import quest_reroll_history
 from state.state_machine import BotState
 from vision.vision import cv2
 
@@ -59,9 +60,13 @@ def replacement_verified(before, after):
 
 class QuestRerollMixin:
     _QUEST_REROLL_TIMEOUT = 10.0
+    _QUEST_REROLL_UI_TIMEOUT = 3.0
+    _QUEST_REROLL_MAX_ATTEMPTS = 3
 
     def _arm_quest_reroll(self):
         self._quest_reroll_pending = True
+        self._quest_reroll_audit_before = None
+        self._quest_reroll_audit_after = None
         self._quest_reroll_floor = self._get_log_size(self._log_path)
         self._quest_reroll_data_floor = None
         self._quest_reroll_unverified_before = None
@@ -69,6 +74,17 @@ class QuestRerollMixin:
 
     def _reroll_log(self, outcome, detail=""):
         bot_logger.log_info(f"Quest reroll: {outcome}" + (f" ({detail})" if detail else "") + ".")
+        try:
+            quest_reroll_history.record_event(
+                outcome, detail=detail,
+                account=str(getattr(self, "_current_account_screen_name", None) or ""),
+                before=getattr(self, "_quest_reroll_audit_before", None),
+                after=getattr(self, "_quest_reroll_audit_after", None),
+            )
+        except Exception as exc:
+            # A disk problem must neither kill the queue thread nor trigger a
+            # second confirmation click. Keep the failure visible in bot.log.
+            bot_logger.log_error(f"Quest reroll history could not be written: {exc}")
 
     def _reroll_can_act(self):
         return (not self._stop_requested
@@ -86,7 +102,19 @@ class QuestRerollMixin:
         exception handling, so a raising screen probe would end that thread.
         """
         try:
-            return self._reroll_quest_on_landing_locked()
+            for attempt in range(self._QUEST_REROLL_MAX_ATTEMPTS):
+                self._quest_reroll_retryable = False
+                result = self._reroll_quest_on_landing_locked()
+                if (not self._quest_reroll_retryable
+                        or attempt + 1 >= self._QUEST_REROLL_MAX_ATTEMPTS
+                        or not self._reroll_can_act()):
+                    return result
+                # Retry only observations BEFORE opening/submitting a dialog.
+                # A confirmation, including an uncertain one, is never repeated.
+                self._quest_reroll_pending = True
+                self._reroll_log("retry", f"pre-submit attempt {attempt + 2}/{self._QUEST_REROLL_MAX_ATTEMPTS}")
+                time.sleep(0.5)
+            return False
         except Exception as exc:
             # Covers the pre-checks and the retry branch below, which run
             # outside the submission try. Block navigation while a dialog may
@@ -119,7 +147,9 @@ class QuestRerollMixin:
             before = self._extract_latest_quest_snapshot(min_offset=self._quest_reroll_floor)
             if before is None:
                 before = self._freshen_quest_reroll_snapshot()
+            self._quest_reroll_audit_before = before
             if before is None:
+                self._quest_reroll_retryable = True
                 self._reroll_log("stale data", "no fresh startup/login quest response")
                 return True
             if before.get("canSwap") is not True:
@@ -133,10 +163,14 @@ class QuestRerollMixin:
                 return True
             if (not self._reroll_can_act() or not self._navigate_to_home()
                     or not self._quest_reroll_home_visible()):
+                self._quest_reroll_retryable = True
                 self._reroll_log("failed", "Home not verified")
                 return False
             # Re-read after navigation in case the user changed quests meanwhile.
             before = self._extract_latest_quest_snapshot(min_offset=self._quest_reroll_floor)
+            self._quest_reroll_audit_before = before
+            if before is None:
+                self._quest_reroll_retryable = True
             if (not before or before.get("canSwap") is not True
                     or not any(is_eligible(q) for q in before["quests"])):
                 self._reroll_log("unavailable", "quest state changed before opening")
@@ -148,6 +182,7 @@ class QuestRerollMixin:
                 # the UI after the search. Otherwise retain the one-shot so a
                 # later queue tick cannot pass an uncertain/overlaid screen.
                 if self._quest_reroll_home_visible():
+                    self._quest_reroll_retryable = True
                     self._reroll_log("skipped", "500-gold quest tile not recognized; Home rechecked")
                     return True
                 self._quest_reroll_pending = True
@@ -158,7 +193,7 @@ class QuestRerollMixin:
             # the dialog open. No queue path may proceed until Home is verified.
             self._quest_reroll_dialog_open = True
             self._click_abs(*point, "QUEST_REROLL_OPEN")
-            if not self._quest_reroll_dialog_visible():
+            if not self._wait_for_reroll_ui(self._quest_reroll_dialog_visible):
                 self._reroll_log("failed", "replacement dialog not recognized")
                 return self._close_quest_reroll_dialog()
             runtime_status.set_startup_phase("Rerolling 500-gold daily quest")
@@ -176,6 +211,7 @@ class QuestRerollMixin:
             self._cached_active_colors = ""
             self._quest_count_confirmed_fresh = False
             runtime_status.update_status(quests=[], active_quest_id="", active_quest_colors="")
+            self._reroll_log("submit_attempt")
             self._click_abs(*confirm, "QUEST_REROLL_CONFIRM")
             self._reroll_log("submitted")
             deadline = time.monotonic() + self._QUEST_REROLL_TIMEOUT
@@ -183,6 +219,7 @@ class QuestRerollMixin:
             reentered_home = False
             while self._reroll_can_act() and time.monotonic() < deadline:
                 after = self._extract_latest_quest_snapshot(min_offset=self._quest_reroll_floor)
+                self._quest_reroll_audit_after = after
                 if replacement_verified(before, after):
                     # The normal cache path applies the verified result and
                     # derives remaining quest count; never credit a vanished id.
@@ -196,6 +233,7 @@ class QuestRerollMixin:
                     reentered_home = True
                     if self._close_quest_reroll_dialog():
                         after = self._freshen_quest_reroll_snapshot(deadline=deadline)
+                        self._quest_reroll_audit_after = after
                         if replacement_verified(before, after):
                             self.refresh_quests_cache()
                             self._reroll_log("verified")
@@ -230,6 +268,17 @@ class QuestRerollMixin:
                         self._quest_reroll_data_floor = self._get_log_size(self._log_path)
                 except Exception as exc:
                     self._reroll_log("failed", f"cache recovery: {exc}")
+
+    def _wait_for_reroll_ui(self, predicate):
+        """Wait for Arena animations without a second click or a blind fallback."""
+        deadline = time.monotonic() + self._QUEST_REROLL_UI_TIMEOUT
+        while self._reroll_can_act():
+            if predicate():
+                return True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.15)
+        return False
 
     def _quest_reroll_templates_ready(self):
         return all(os.path.isfile(self._app_path("assets", "assert", "quest_reroll", name + ".png"))
@@ -349,11 +398,10 @@ class QuestRerollMixin:
                 self._reroll_log("failed", "dialog remains open; navigation blocked")
                 return False
             self._click_abs(*cancel, "QUEST_REROLL_CANCEL")
-            time.sleep(0.3)
-            if self._quest_reroll_dialog_visible():
+            if not self._wait_for_reroll_ui(lambda: not self._quest_reroll_dialog_visible()):
                 self._reroll_log("failed", "dialog still visible after Cancel; navigation blocked")
                 return False
-        if not self._quest_reroll_home_visible():
+        if not self._wait_for_reroll_ui(self._quest_reroll_home_visible):
             self._reroll_log("failed", "Home not visible after dialog; navigation blocked")
             return False
         self._quest_reroll_dialog_open = False

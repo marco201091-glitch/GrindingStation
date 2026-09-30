@@ -19,22 +19,16 @@ This file contains sensitive information and is explicitly excluded from access.
   fixes one.
 
 
-## Versioning / Auto-Update
+## Project Scope / Updates
 
-The bot has two auto-update channels (see `update_checker.py`): git installs
-pull every new commit via `git pull`, but ZIP/website installs (no `.git`) only
-get an update **when `version.py` on `main` goes up** (the `__version__` number
-is compared, then `main.zip` is downloaded).
+GrindingStation is an independent project for personal local use, separate from
+PhyrexianArena. Application self-updates have been removed intentionally. Do not
+restore update checks, Git pulls, or upstream ZIP overlays without an explicit
+user request. Manage code changes manually in this repository.
 
-**Do NOT bump `version.py` on every push.** A bump raises an update dialog for
-*all* ZIP users, so it should only happen for larger, user-visible changes (real
-new features, important fixes to bot behaviour) — not for internal rework,
-refactors, docs, tooling or updater internals.
-
-Procedure: when a commit *might justify* a bump, **ask the user before** doing
-it ("Should this trigger a user update? Bump the version?"). Only bump
-`version.py` after explicit confirmation. When in doubt, **don't** — ask. Bump
-semantically: patch for fixes, minor for features.
+The user accepts local plaintext account storage and unpinned dependencies.
+CI expansion, general documentation/version cleanup, and licensing work are not
+part of the current scope. Do not reopen these audit items unless requested.
 
 ## Documentation
 

@@ -1,9 +1,42 @@
-# Burning Lotus Bot
+# GrindingStation
+
+## Releases
+
+GrindingStation uses independent versioning, starting at **1.0.0**. Upstream
+Burning Lotus version numbers describe imported changes only.
+`version.py` is the application version; Git tags use `vMAJOR.MINOR.PATCH`.
+Stable Windows executables are attached to GitHub Releases with SHA-256 checksums.
+`main` holds the released baseline; `development/1.1` is the next development line.
+See [CHANGELOG.md](CHANGELOG.md) and [the flow analysis](docs/flow-optimization.md).
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 Free, open-source Magic the Gathering Arena (MTGA) bot for automating daily quests, daily wins, and account switching. Burning Lotus runs on Windows, macOS, and Linux without code injection or subscriptions. Built in Python with a graphical UI, no command-line knowledge required.
 
 Feel free to inspect the code, request a feature, or report a bug via GitHub Issues or open a pull request. Discord: https://discord.gg/5v6V6HvCRn
+
+## GrindingStation interface
+
+GrindingStation keeps the original narrow window geometry and UI scale settings,
+with a navy and mint theme, the gear-and-glowing-core logo, a two-column command
+area, live status, daily quests, and session totals when space permits. Settings,
+accounts, calibration, recording, and session windows share the same colors.
+Use Tab / Shift+Tab to move among the main actions, and Enter / Space to activate.
+The existing mouse-wheel stop shortcut remains available.
+
+For an isolated visual check without reading accounts or starting the bot, run
+`.venv\Scripts\python.exe tools/preview_ui.py --scale 50` (also supports 100
+and 120). Screenshots go to the ignored `runtime/ui-preview/` directory; preview
+settings and runtime data use a temporary directory.
+
+## GrindingStation: local installation
+
+The desktop shortcut `GrindingStation` runs the installed versioned Windows
+executable in this repository. The app icon is in
+`images/grinding_station.ico` (PNG source alongside it).
+
+To import an existing setup, close the app and copy account folders into
+`Accounts/`, and configuration files into `runtime/config/` (including
+`calibration_config.json`). These paths are local and ignored by Git.
 
 ## Requirements
 
@@ -90,18 +123,34 @@ python -m venv .venv
 
 ### Updates
 
-The bot checks GitHub for a newer version on startup and, when one is found, a dialog offers to install it and restarts the bot automatically. There are two channels, picked automatically:
-
-- **Git installs** (started from a `git clone` of this repository): the check works off git commit history (not the version number below), only fetches when the remote is actually ahead of local, and installs via a fast-forward `git pull`. If you have local, uncommitted changes to *tracked* files in the bot folder, the update is aborted rather than overwriting them, and the dialog lists which file(s) are affected. Untracked files (your venv, notes, …) never block an update.
-- **ZIP / website installs** (no `.git` folder): the bot compares its local `version.py` against the one on the `main` branch at GitHub. If `main` has a newer version, it downloads the branch archive and overlays it onto the install folder. The archive only contains tracked source files, so user data (`runtime/`, `Accounts/`, `.venv/`, `.venv-macos/`, …) is never touched. Executable bits on the launcher scripts are preserved, so `start_macos.command` / `start_linux.sh` stay double-clickable after an update.
-
-Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
-
-The app's current version (`1.5.1`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+GrindingStation is an independent local fork. Application updates are disabled:
+there are no startup update checks, update dialogs, Git pulls, or ZIP downloads
+performed by the app. Changes are managed manually in this repository.
 
 ### Version 1.5.1
 
 - Fixed a gameplay stall after MTGA is moved or resized during a match: the bot now refuses obsolete screen coordinates instead of slowly sweeping empty space while trying to play cards. Restore a visible 16:9 game window and it will safely retry on the next game-state update.
+
+## Historic navigation and quest reroll history
+
+After login, Historic navigation waits up to 30 seconds for a freshly verified
+Arena window instead of clicking through the server-loading screen. If verification
+fails, the queue loop retries the verified navigation; obsolete full-screen
+Historic templates are no longer used as a fallback.
+
+Quest rerolls retry transient pre-dialog failures up to three times and wait for
+dialog animations. Once confirmation has been attempted, it is never submitted
+again during that landing check, even if the response is uncertain.
+
+`runtime/logs/quest_rerolls.txt` records UTC timestamps, account name, outcome,
+and quest IDs/objectives/progress/rewards before and after. `verified` means the
+fresh Arena response confirmed the replacement; `submit_attempt` and `submitted`
+do not claim success. Only incomplete 500-gold quests are eligible.
+
+Retention is 48 hours: pruning runs on every entry and approximately once a minute
+while the UI is open (also while the bot is stopped). With the app closed, expired
+entries are removed at the next UI poll or write. `MTGA_RUNTIME_DIR` relocates the
+file with the rest of runtime data. Credentials are never included.
 
 ## Configuration
 
@@ -520,3 +569,16 @@ Diagnosing this class of failure: check `Initialize engine version` at the top o
 
 ## See also on
 [elitepvpers](https://www.elitepvpers.com/)
+
+
+### GrindingStation: upstream gameplay fixes (1.5.5)
+
+Integrated gameplay changes from upstream commit `0d33a5d` (PR #61): guarded cast recovery, target/payment prompt handling, scry/surveil decision resumption, and bounded exclusive input ownership. Failed casts produce diagnostic bundles in `runtime/debug/`; `tools/analyze_cast_recovery.py` summarizes their outcomes. GrindingStation retains its custom UI, disabled self-updates, Historic loading fixes, and quest reroll history with 48-hour retention.
+
+Historic deck matching normalizes the Arena client to 1920x1080 reference coordinates and searches account thumbnails at 0.60–1.80 scale, covering different capture sizes and grid zoom. Matching remains restricted to the deck grid at the existing confidence threshold; clicks map back to the actual client, including 1366x768.
+
+After a Victory or Defeat screen, GrindingStation waits 10 seconds after each Continue click before considering another click. A fresh Arena `MainNav` event also confirms the return to the menu, avoiding stray clicks during the transition. A separate 15-second post-match hold begins after dismissal.
+
+If Arena shows the disconnected overlay, the queue loop recognizes its Reconnect button using the live MTGA window rectangle even when normal navigation anchors are hidden. It clicks the verified button, pauses 15 seconds for loading, then retries if the overlay remains. This also works with 1366x768 and 1920x1080 clients.
+
+After a match, the 10-second pause between result-screen clicks remains. The additional post-match hold is 15 seconds. Historic now claims a reward only when both the Reward title and Claim button are visible in the live MTGA window; it then lets the screen change before navigating. This prevents a persistent reward popup from blocking Historic queue selection.
