@@ -485,7 +485,8 @@ class CastRecoveryTest(unittest.TestCase):
         self.controller._Controller__write_cast_ack_bundle = lambda payload: bundles.append(payload)
         self.controller._Controller__schedule_decision_recovery = lambda *_args: None
 
-        with mock.patch("Controller.MTGAController.Controller.threading.Thread", _ImmediateThread):
+        with mock.patch("Controller.MTGAController.Controller.threading.Thread", _ImmediateThread), \
+                mock.patch.object(self.controller, "_Controller__recover_ineffective_cast"):
             self.controller._Controller__probe_cast_ack(attempt_id, final_probe=True)
 
         event, details = next((event, details) for event, details in self.events

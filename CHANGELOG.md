@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0-dev — in development
+
+- Menu state now follows the latest explicit log transition; incidental format
+  and deck names no longer invent Historic/My Decks/Find Match state.
+- Match completion and unknown loading scenes invalidate prior state; the
+  incremental tracker retains explicit state when its diagnostic tail rotates.
+- Non-1920×1080 clients go directly to normalized image matching, avoiding an
+  unnecessary native-size timeout on every lookup.
+- Rotation and cast-acknowledgement tests isolate recovery probes from the live
+  desktop, preventing screen-dependent waits during the test suite.
+- Remaining work and acceptance checks: docs/development-1.1.md.
+
 ## 1.0.0 — 2026-09-30
 
 First independently versioned GrindingStation release, based on the existing

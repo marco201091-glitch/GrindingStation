@@ -2292,7 +2292,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # The direct (pyautogui) path is single-scale only; when a caller needs
         # scale-tolerant matching it passes `scales`, so skip straight to the
         # multi-scale rescaled matcher.
-        if use_direct and not scales:
+        if use_direct and not scales and arena[2:] == (1920, 1080):
             point = self._locate_image_center_direct(
                 image_path,
                 f"{label}_LOCATE",

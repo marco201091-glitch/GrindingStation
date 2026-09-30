@@ -28,45 +28,40 @@ _SCENE_MAP = {
     "collection": BotState.MY_DECKS,
     "store": BotState.STORE,
     "options": BotState.OPTIONS,
+    "historic": BotState.HISTORIC,
 }
 
 
-def get_state_from_playerlog(log_tail: str) -> BotState:
-    text = str(log_tail or "")
-    if not text:
-        return BotState.UNKNOWN
+def _latest_state_event(text: str) -> BotState | None:
+    """Latest explicit transition; None means there is no state evidence.
 
+    Deck names, quest payloads and format lists contain menu words too. They
+    must never change navigation state or outweigh a later MainNav event.
+    UNKNOWN is an actual transition (completion/loading), distinct from None.
+    """
     lowered = text.lower()
-    # A GameStateMessage means we're in a match -- but ONLY if it's more recent
-    # than the last "left the match" marker (a menu/event scene load, MainNav, or
-    # MatchCompleted). Otherwise a match's game-state messages linger in the tail
-    # and keep reporting IN_GAME long after we returned to a menu, which stalls
-    # the post-match queue/reward flow.
-    gsm_pos = lowered.rfind("gremessagetype_gamestatemessage")
-    scene_iter = list(re.finditer(r'"toSceneName"\s*:\s*"([^"]+)"', text))
-    left_pos = max(
-        lowered.rfind("mainnav load in"),
-        lowered.rfind("matchgameroomstatetype_matchcompleted"),
-        (scene_iter[-1].start() if scene_iter else -1),
-    )
-    if gsm_pos != -1 and gsm_pos > left_pos:
-        return BotState.IN_GAME
+    events = [
+        (lowered.rfind(marker), state)
+        for marker, state in (
+            ("gremessagetype_gamestatemessage", BotState.IN_GAME),
+            ("mainnav load in", BotState.HOME),
+            ("matchgameroomstatetype_matchcompleted", BotState.UNKNOWN),
+        )
+    ]
+    for match in re.finditer(r'"toSceneName"\s*:\s*"([^"]+)"', text):
+        scene = match.group(1).strip().lower()
+        state = next(
+            (_SCENE_MAP[key] for key in sorted(_SCENE_MAP, key=len, reverse=True)
+             if key in scene),
+            BotState.UNKNOWN,
+        )
+        events.append((match.start(), state))
+    position, state = max(events, key=lambda event: event[0])
+    return state if position >= 0 else None
 
-    if scene_iter:
-        scene = scene_iter[-1].group(1).strip().lower()
-        for key, value in _SCENE_MAP.items():
-            if key in scene:
-                return value
 
-    if "my decks" in lowered:
-        return BotState.MY_DECKS
-    if "historic" in lowered:
-        return BotState.HISTORIC
-    if "find match" in lowered:
-        return BotState.FIND_MATCH
-    if "mainnav load in" in lowered:
-        return BotState.HOME
-    return BotState.UNKNOWN
+def get_state_from_playerlog(log_tail: str) -> BotState:
+    return _latest_state_event(str(log_tail or "")) or BotState.UNKNOWN
 
 
 def should_act(
@@ -94,7 +89,11 @@ class PlayerLogStateTracker:
         if not text:
             return
         self._lines.append(text)
-        self._last_state = get_state_from_playerlog("\n".join(self._lines))
+        # Parse only new input. Unrelated traffic cannot erase an explicit
+        # transition merely because its line falls out of the diagnostic tail.
+        state = _latest_state_event(text)
+        if state is not None:
+            self._last_state = state
 
     def get_state(self) -> BotState:
         return self._last_state

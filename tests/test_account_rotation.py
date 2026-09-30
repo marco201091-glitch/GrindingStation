@@ -17,6 +17,7 @@ import threading
 import time as time_module
 import types
 import unittest
+from unittest.mock import Mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -30,7 +31,13 @@ from state.state_machine import BotState
 def make_controller() -> Controller:
     f = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
     f.close()
-    return Controller(f.name)
+    controller = Controller(f.name)
+    controller._handle_disconnect_overlay = Mock(return_value=False)
+    controller._dismiss_historic_reward_popup = Mock(return_value=False)
+    controller._locate_image_center_in_scaled_arena_region = Mock(return_value=None)
+    controller._click_image_in_scaled_arena_region = Mock(return_value=False)
+    controller._vision.capture = Mock(side_effect=AssertionError("live screen forbidden in rotation tests"))
+    return controller
 
 
 def accounts(*names: str) -> list[dict]:
