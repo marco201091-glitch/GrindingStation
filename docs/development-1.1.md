@@ -34,6 +34,11 @@ Versione locale: `1.1.0-dev`; il collegamento desktop resta sulla 1.0.0.
   `test_combat_shadow...decision_is_recorded...`); nessuno riguarda Reconnect.
 - Build di prova: `GrindingStation-1.1.0-dev.exe`; non è una release e non è
   collegata al desktop.
+- Build locale di produzione: `GrindingStation-1.1.0.exe`, compilata con
+  versione applicativa 1.1.0 e impostata sul collegamento desktop principale.
+  `GrindingStation-1.0.0.exe` è preservata; il collegamento desktop
+  `GrindingStation v1 - Rollback` la avvia. La build locale non è una release
+  GitHub.
 - `git diff --check` e compilazione Python dei moduli modificati.
 
 ## Prima della release 1.1

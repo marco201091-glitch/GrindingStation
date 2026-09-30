@@ -9,10 +9,12 @@ Stable Windows executables are attached to GitHub Releases with SHA-256 checksum
 `main` holds the released baseline; `development/1.1` is the next development line.
 See [CHANGELOG.md](CHANGELOG.md) and [the flow analysis](docs/flow-optimization.md).
 
-This branch is **1.1.0-dev**. It starts by fixing chronological log-state
-tracking and avoiding native-size template waits on scaled Arena clients.
-The installed desktop release remains 1.0.0. Development progress is tracked
-in [docs/development-1.1.md](docs/development-1.1.md).
+This branch is **1.1.0-dev**. A local production build, `GrindingStation-1.1.0.exe`,
+is currently installed through the desktop shortcut. The original
+`GrindingStation-1.0.0.exe` remains intact, with a separate
+`GrindingStation v1 - Rollback` desktop shortcut for immediate rollback. This
+local build has not been published as a GitHub release. Development progress is
+tracked in [docs/development-1.1.md](docs/development-1.1.md).
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 Free, open-source Magic the Gathering Arena (MTGA) bot for automating daily quests, daily wins, and account switching. Burning Lotus runs on Windows, macOS, and Linux without code injection or subscriptions. Built in Python with a graphical UI, no command-line knowledge required.
