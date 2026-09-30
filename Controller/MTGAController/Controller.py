@@ -11452,6 +11452,51 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_error(f"Historic reward probe failed: {exc}")
             return False
 
+    def _find_disconnect_action_button(self, frame, template: str):
+        """Find Reconnect by label, or the same outlined button with Retry text.
+
+        Arena uses the same pill outline and central placement for its Retry
+        recovery prompt, but the button label differs. The fallback compares only
+        the bright outer outline, excluding the label area, and is confined to the
+        already verified disconnect-dialog ROI.
+        """
+        import cv2
+        import numpy as np
+
+        match = self._vision.find_template(
+            frame, template, threshold=0.88,
+            scales=(0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15),
+        )
+        if match is not None:
+            return match, "RECONNECT"
+
+        button = cv2.imread(template, cv2.IMREAD_GRAYSCALE)
+        if button is None:
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        base_h, base_w = button.shape[:2]
+        base_mask = np.where(button > 90, 255, 0).astype(np.uint8)
+        # Ignore the label while keeping the upper/lower rim and rounded ends.
+        base_mask[int(base_h * 0.30):int(base_h * 0.72), int(base_w * 0.12):int(base_w * 0.88)] = 0
+        for scale in (0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15):
+            width = max(1, int(round(base_w * scale)))
+            height = max(1, int(round(base_h * scale)))
+            scaled = cv2.resize(button, (width, height), interpolation=cv2.INTER_AREA)
+            mask = cv2.resize(base_mask, (width, height), interpolation=cv2.INTER_NEAREST)
+            image = gray.astype(np.float32)
+            candidate = scaled.astype(np.float32)
+            weight = (mask.astype(np.float32) / 255.0)
+            cross = cv2.matchTemplate(image, candidate, cv2.TM_CCORR, mask=weight)
+            patch_energy = cv2.matchTemplate(image * image, weight, cv2.TM_CCORR)
+            template_energy = float(np.sum(candidate * candidate * weight))
+            error = np.maximum(0.0, template_energy + patch_energy - 2.0 * cross)
+            score = error / np.maximum(1.0, template_energy + patch_energy)
+            min_score, _max_score, min_loc, _max_loc = cv2.minMaxLoc(score)
+            if min_score <= 0.12:
+                match = type("TemplateMatch", (), {"x": min_loc[0], "y": min_loc[1]})()
+                return match, "RETRY"
+        return None
+
     def _handle_disconnect_overlay(self) -> bool:
         """Recover the visible Reconnect prompt before any queue navigation.
 
@@ -11486,18 +11531,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if frame is None or frame.size == 0:
                     return None
                 normalized = cv2.resize(frame, (1220, 460))
-                return self._vision.find_template(
-                    normalized, template, threshold=0.82,
-                    scales=(0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15),
-                )
+                return self._find_disconnect_action_button(normalized, template)
 
             if visible_button() is None:
                 return False
             if not focus_mtga_window() or self._stop_requested:
                 return True
-            match = visible_button()
-            if match is None:
+            found = visible_button()
+            if found is None:
                 return True
+            match, action_name = found
             point = (
                 roi[0] + int(round(match.x * roi[2] / 1220)),
                 roi[1] + int(round(match.y * roi[3] / 460)),
@@ -11505,7 +11548,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._reconnect_recovery_pending = True
             self._reconnect_retry_after = time.time() + 15.0
             self._historic_selection_key = None
-            bot_logger.log_info(f"Arena disconnected: clicking Reconnect at {point}; waiting for reload.")
+            bot_logger.log_info(
+                f"Arena disconnected: clicking {action_name.title()} at {point}; waiting for reload."
+            )
             transaction = getattr(getattr(self, "input", None), "input_transaction", None)
             context = transaction(timeout=0.5) if callable(transaction) else nullcontext(True)
             with context as acquired:
@@ -11513,7 +11558,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return True
                 if visible_button() is None:
                     return True
-                self._click_abs(point[0], point[1], "RECONNECT")
+                self._click_abs(point[0], point[1], action_name)
             return True
         except Exception as exc:
             self._reconnect_recovery_pending = False

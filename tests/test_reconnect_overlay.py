@@ -18,7 +18,7 @@ TEMPLATE = ROOT / "assets" / "assert" / "reconnect_button.png"
 
 
 class ReconnectOverlayTests(unittest.TestCase):
-    def make_controller(self, width, height, *, visible=True):
+    def make_controller(self, width, height, *, visible=True, retry_label=False):
         controller = Controller.__new__(Controller)
         controller._stop_requested = False
         controller._get_state_from_log = mock.Mock(return_value=BotState.IN_GAME)
@@ -34,6 +34,13 @@ class ReconnectOverlayTests(unittest.TestCase):
         reference = np.zeros((460, 1220, 3), dtype=np.uint8)
         if visible:
             button = cv2.imread(str(TEMPLATE))
+            if retry_label:
+                bh, bw = button.shape[:2]
+                cv2.rectangle(button, (int(bw * 0.18), int(bh * 0.30)),
+                              (int(bw * 0.82), int(bh * 0.72)), (0, 0, 0), -1)
+                cv2.putText(button, "Retry", (int(bw * 0.36), int(bh * 0.68)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (230, 230, 230), 1,
+                            cv2.LINE_AA)
             bh, bw = button.shape[:2]
             reference[230:230 + bh, 465:465 + bw] = button
         arena = (200, 100, width, height)
@@ -55,6 +62,17 @@ class ReconnectOverlayTests(unittest.TestCase):
                 self.assertEqual(tag, "RECONNECT")
                 self.assertAlmostEqual(x, 200 + round(960 * width / 1920), delta=3)
                 self.assertAlmostEqual(y, 100 + round(594 * height / 1080), delta=3)
+                self.assertIsNone(controller._historic_selection_key)
+
+    def test_clicks_retry_label_using_the_disconnect_button_outline(self):
+        for width, height in ((1920, 1080), (1366, 768)):
+            with self.subTest(size=(width, height)):
+                controller = self.make_controller(width, height, retry_label=True)
+                with mock.patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True), \
+                     mock.patch("Controller.MTGAController.Controller.time.time", return_value=100.0):
+                    self.assertTrue(controller._handle_disconnect_overlay())
+                controller._click_abs.assert_called_once()
+                self.assertEqual(controller._click_abs.call_args.args[2], "RETRY")
                 self.assertIsNone(controller._historic_selection_key)
 
     def test_no_prompt_means_no_click(self):

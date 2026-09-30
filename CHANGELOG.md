@@ -12,6 +12,9 @@
 - A session reconnect monitor runs outside the queue loop, serializes its click
   against menu navigation, and pauses game actions until Arena emits new game
   state after reconnect.
+- Disconnect recovery also recognizes Arena's Retry action when it reuses the
+  Reconnect button outline with a different label; both paths are bounded to the
+  verified disconnect-dialog region and retry cooldown.
 - Queue Play is a single click; retries wait for state evidence instead of
   sending a second click to an unverified screen.
 - Historic navigation resumes from its verified current page without an
