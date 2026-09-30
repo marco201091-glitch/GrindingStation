@@ -101,6 +101,36 @@ class QuestReadGateTests(_QuestLogTestBase):
         self.assertIsNotNone(quests)
         self.assertEqual([q["locKey"] for q in quests], [GOLGARI])
 
+    def test_quest_snapshot_is_reused_for_same_account_and_log_revision(self):
+        self.append(quests_block(GOLGARI))
+        first = self.controller._extract_latest_quest_snapshot()
+        misses = self.controller._quest_snapshot_cache_misses
+        second = self.controller._extract_latest_quest_snapshot()
+        self.assertEqual(first, second)
+        self.assertEqual(self.controller._quest_snapshot_cache_misses, misses)
+        self.assertEqual(self.controller._quest_snapshot_cache_hits, 1)
+
+    def test_empty_quest_snapshot_is_cached_and_new_log_revision_invalidates_it(self):
+        self.append('<== QuestGetQuests {"quests": []}\n')
+        self.assertEqual(self.controller._extract_latest_quest_snapshot()["quests"], [])
+        misses = self.controller._quest_snapshot_cache_misses
+        self.assertEqual(self.controller._extract_latest_quest_snapshot()["quests"], [])
+        self.assertEqual(self.controller._quest_snapshot_cache_misses, misses)
+        self.append(quests_block(GOLGARI, quest_id="q-new"))
+        refreshed = self.controller._extract_latest_quest_snapshot()
+        self.assertEqual(refreshed["quests"][0]["questId"], "q-new")
+        self.assertEqual(self.controller._quest_snapshot_cache_misses, misses + 1)
+
+    def test_snapshot_is_account_scoped_and_returned_quest_data_is_immutable(self):
+        self.append(quests_block(GOLGARI))
+        quests = self.controller._extract_latest_quests()
+        quests[0]["locKey"] = "corrupted-by-consumer"
+        self.assertEqual(self.controller._extract_latest_quests()[0]["locKey"], GOLGARI)
+        misses = self.controller._quest_snapshot_cache_misses
+        self.controller._current_account_screen_name = "Other#22222"
+        self.controller._extract_latest_quest_snapshot()
+        self.assertEqual(self.controller._quest_snapshot_cache_misses, misses + 1)
+
     def test_newest_block_wins(self):
         self.append(quests_block(SIMIC))
         self.append(match_auth_block("venturaa"))

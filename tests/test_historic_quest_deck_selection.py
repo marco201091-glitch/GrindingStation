@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -155,7 +156,8 @@ class _HistoricTestBase(unittest.TestCase):
         what the player.log claims. They are separate on purpose -- the log state
         is substring-matched over a 250 KB tail and goes stale."""
         self.nav_calls = []
-        self.controller._navigate_to_home = lambda: home
+        self.home_calls = []
+        self.controller._navigate_to_home = lambda: self.home_calls.append("home") or home
         def oob():
             self.nav_calls.append("oob")
             return nav
@@ -317,6 +319,23 @@ class HistoricSelectionTests(_HistoricTestBase):
         self.assertFalse(self.controller._ensure_historic_selection())
         self.assertEqual(self.nav_calls, ["oob"])          # no second navigation
         self.assertEqual(self.controller._historic_selection_failures, 1)
+
+    def test_transient_navigation_failure_uses_short_backoff_without_home_reset(self):
+        self.append(quests_block(BOROS))
+        self.arm_navigation(nav=False)
+        self.assertFalse(self.controller._ensure_historic_selection())
+        self.assertEqual(self.controller._historic_selection_failures, 0)
+        self.assertLessEqual(
+            self.controller._historic_selection_retry_ts - time.time(),
+            self.controller._HISTORIC_NAV_RETRY_SEC,
+        )
+        self.assertEqual(self.home_calls, [])
+
+    def test_navigation_resumes_from_already_open_historic_page(self):
+        self.append(quests_block(BOROS))
+        self.arm_navigation()
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.home_calls, [])
 
     def test_backoff_expiry_retries_and_success_clears_it(self):
         self.append(quests_block(BOROS))
@@ -655,10 +674,6 @@ class RememberedSelectionTests(_HistoricTestBase):
         checks = iter((False, True))
         self.controller._historic_selection_screen_verified = lambda: next(checks)
         self.on_screen = set()
-        self.on_screen.add("R.png")
-        self.controller._click_image = lambda path, *a, **k: (
-            os.path.basename(path) in self.on_screen
-        )
         # A stale location cache triggers navigation, but the already selected
         # deck is recognized and never clicked a second time.
         self.assertTrue(self.controller._ensure_historic_selection())

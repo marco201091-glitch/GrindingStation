@@ -14,6 +14,13 @@
   state after reconnect.
 - Queue Play is a single click; retries wait for state evidence instead of
   sending a second click to an unverified screen.
+- Historic navigation resumes from its verified current page without an
+  unconditional Home reset; transient navigation failures retry quickly while
+  missing deck/configuration failures keep progressive backoff.
+- Quest snapshots are scoped to the active account and Player.log revision,
+  reuse valid empty lists, and avoid repeated parsing/log lines between writes.
+- Offline matcher and navigation checks cover translated client windows at
+  both 1366×768 and 1920×1080.
 - Menu state now follows the latest explicit log transition; incidental format
   and deck names no longer invent Historic/My Decks/Find Match state.
 - Match completion and unknown loading scenes invalidate prior state; the

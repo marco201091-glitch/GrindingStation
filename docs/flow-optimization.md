@@ -2,6 +2,12 @@
 
 Data: 30 settembre 2026. Analisi statica della versione homeflow e riscontro sul log locale 15:37–15:50 e sulla schermata diagnostica 15:49:49. Il log precede l'ultima build: dimostra i problemi osservati, non il comportamento della homeflow dopo il rilascio. Nessuna modifica al comportamento applicativo in questa analisi.
 
+Aggiornamento 30 settembre 2026: i punti di coordinamento, Claim condiviso,
+Reconnect, Play singolo, ripresa Historic, snapshot quest e prove sintetiche
+alle due dimensioni sono stati implementati in `development/1.1`. Le verifiche
+ancora necessarie prima della release sono prove interattive con Arena; il
+tracciamento aggiornato è in [development-1.1.md](development-1.1.md).
+
 ## Flussi attuali
 
 - Avvio: caricamento dati carte → lettura quest fresca (fino a 30 s dopo la navigazione) → reroll → eventuale verifica cambio account → navigazione della modalità → selezione mazzo → Play.

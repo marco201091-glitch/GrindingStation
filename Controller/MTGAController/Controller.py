@@ -6,6 +6,7 @@ import time
 import os
 import sys
 import ctypes
+import copy
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -811,6 +812,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._cached_quests: list[dict] = []
         self._cached_active_quest_id: str = ""
         self._cached_active_colors: str = ""
+        self._quest_snapshot_key: tuple[str, int, int] | None = None
+        self._quest_snapshot: dict | None = None
+        self._quest_snapshot_cache_hits = 0
+        self._quest_snapshot_cache_misses = 0
+        self._last_logged_quest_snapshot_key = None
         # Log offset below which quests blocks are ignored while a session is being
         # primed (see prime_quests_for_new_session). Everything already in the log
         # when Start is pressed may belong to another account -- or to the quest
@@ -2575,7 +2581,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if not replacement_verified(before, snapshot):
                 return None
             self._quest_reroll_unverified_before = None
-        return snapshot["quests"]
+        return copy.deepcopy(snapshot["quests"])
+
+    def _quest_snapshot_revision(self) -> tuple[str, int, int]:
+        """Account and current log length uniquely identify a cached quest block.
+
+        A growing log invalidates this snapshot, while repeated consumers between
+        new log writes (Historic selection, Starter selection, UI refresh) share
+        the already parsed block. A log truncation naturally changes the revision.
+        """
+        account = self._canonical_screen_name(self._current_account_screen_name).casefold()
+        if not self._log_path:
+            return account, 0, 0
+        try:
+            stat = os.stat(self._log_path)
+            return account, int(stat.st_size), int(stat.st_mtime_ns)
+        except OSError:
+            return account, 0, 0
 
     def _extract_latest_quest_snapshot(self, *, min_offset: int | None = None) -> dict | None:
         """Latest {quests, canSwap} response, or None when none is available.
@@ -2587,6 +2609,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         The legacy list-only method shares this parser."""
         if not self._log_path:
             return None
+        if min_offset is not None:
+            self._quest_snapshot_key = None
+            self._quest_snapshot = None
+        revision = self._quest_snapshot_revision()
+        if min_offset is None and revision == self._quest_snapshot_key:
+            self._quest_snapshot_cache_hits += 1
+            return self._quest_snapshot
+        self._quest_snapshot_cache_misses += 1
         # While we have not yet latched the incoming account's screenName after a
         # switch, read only the log written since the switch so the previous
         # account's block (still in the 600KB tail) can't be latched as the new
@@ -2684,7 +2714,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # is unavailable; malformed explicit values remain unknown. Only a
         # literal true response can ever authorize clicking a quest.
         can_swap = payload.get("canSwap", False)
-        return {"quests": quests, "canSwap": can_swap if type(can_swap) is bool else None}
+        snapshot = {"quests": quests, "canSwap": can_swap if type(can_swap) is bool else None}
+        if min_offset is None:
+            self._quest_snapshot_key = self._quest_snapshot_revision()
+            self._quest_snapshot = snapshot
+        return snapshot
 
     @staticmethod
     def _canonical_screen_name(screen: str | None) -> str:
@@ -3172,8 +3206,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         return False
 
     def _select_best_quest(self) -> dict | None:
+        cache_hits_before = self._quest_snapshot_cache_hits
         quests = self._extract_latest_quests() or []
-        bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
+        if self._quest_snapshot_cache_hits == cache_hits_before:
+            bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
         guild_quests = self._parse_guild_quests(quests)
         if guild_quests:
             # Prefer a quest that still has progress to make. Without this the live
@@ -3715,11 +3751,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             pass
         # Refresh the current/next account lines shown under the UI toggle.
         self._publish_account_switch_status()
-        bot_logger.log_info(
-            "Quests cached: {} quest(s); active={} colors={}.".format(
-                len(view), active_id or "-", active_colors or "-"
+        snapshot_key = self._quest_snapshot_key
+        if snapshot_key != self._last_logged_quest_snapshot_key:
+            bot_logger.log_info(
+                "Quests cached: {} quest(s); active={} colors={}.".format(
+                    len(view), active_id or "-", active_colors or "-"
+                )
             )
-        )
+            self._last_logged_quest_snapshot_key = snapshot_key
         return view
 
     # How long the start-of-session quest priming waits for MTGA to log a fresh
@@ -3738,6 +3777,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._cached_quests = []
         self._cached_active_quest_id = ""
         self._cached_active_colors = ""
+        self._quest_snapshot_key = None
+        self._quest_snapshot = None
         self._last_valid_quest_active_incomplete = None
         self._quest_count_confirmed_fresh = False
         self._last_quests_read_was_fresh = False
@@ -5886,12 +5927,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # match's worth of seconds); a target this install genuinely cannot satisfy
     # settles at one attempt a minute instead of one every queue-loop tick.
     _HISTORIC_SELECTION_BACKOFF_SEC = (5.0, 15.0, 30.0, 60.0)
+    _HISTORIC_NAV_RETRY_SEC = 3.0
 
-    def _historic_selection_failed(self) -> bool:
-        """Record a failed selection attempt, arm the backoff, and return False."""
-        self._historic_selection_failures += 1
-        idx = min(self._historic_selection_failures, len(self._HISTORIC_SELECTION_BACKOFF_SEC)) - 1
-        backoff = self._HISTORIC_SELECTION_BACKOFF_SEC[idx]
+    def _historic_selection_failed(self, *, retry_sec: float | None = None) -> bool:
+        """Record failure with short recovery for transitions, long retry for setup."""
+        if retry_sec is None:
+            self._historic_selection_failures += 1
+            idx = min(self._historic_selection_failures, len(self._HISTORIC_SELECTION_BACKOFF_SEC)) - 1
+            backoff = self._HISTORIC_SELECTION_BACKOFF_SEC[idx]
+        else:
+            backoff = max(0.5, float(retry_sec))
         self._historic_selection_retry_ts = time.time() + backoff
         bot_logger.log_error(
             "Historic: selection attempt {} failed; not queueing, retrying in {:.0f}s.".format(
@@ -5931,7 +5976,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "Historic: remembered deck key is stale; selection screen is no longer visible."
             )
             self._historic_selection_key = None
-            self._forget_selected_deck()
         state = self._get_state_from_log()
         if state in (BotState.IN_GAME, BotState.FIND_MATCH):
             # A match is running or loading -- the screen is not ours to navigate.
@@ -5948,31 +5992,21 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             "Historic: selection unverified for this quest (target colors={} forced={}); "
             "navigating to the Historic deck screen.".format(colors or "-", forced_filename or "-")
         )
-        # The navigation actions start from Home (POST_LOGIN_PLAY requires it).
-        # The Home anchor check is known to be flaky on the event/new-UI screens,
-        # so a failed verify is not fatal by itself -- the first navigation action
-        # gates on the state anyway and fails cleanly if we are not there.
-        reached_home = False
-        for _ in range(2):
-            if self._stop_requested:
-                return False
-            if self._navigate_to_home():
-                reached_home = True
-                break
-            time.sleep(0.8)
-        if not reached_home:
-            bot_logger.log_info("Historic: Home not confirmed; attempting navigation anyway.")
+        # The action sequence is idempotent and uses skip anchors to resume from
+        # Home, an open Play blade, Historic, or My Decks. Avoid an unconditional
+        # Home click, which costs a transition and can leave an already-correct
+        # page before the resumable actions begin.
         if not self._run_post_login_navigation_oob():
             bot_logger.log_error(
                 "Historic: navigation to the deck screen failed; NOT queueing, "
                 "so the last-played Starter deck is not re-entered."
             )
-            return self._historic_selection_failed()
+            return self._historic_selection_failed(retry_sec=self._HISTORIC_NAV_RETRY_SEC)
         if self._select_historic_deck_for_quest(colors, forced_filename) is None:
             return self._historic_selection_failed()
         time.sleep(1.0)
         if not self._historic_selection_screen_verified():
-            return self._historic_selection_failed()
+            return self._historic_selection_failed(retry_sec=self._HISTORIC_NAV_RETRY_SEC)
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
         self._historic_selection_key = key
