@@ -648,6 +648,22 @@ class RememberedSelectionTests(_HistoricTestBase):
         self.assertTrue(self.controller._ensure_historic_selection())
         self.assertEqual(self.clicked_decks, ["R.png"], "the tile was already selected")
 
+    def test_cached_selection_is_reused_only_while_historic_screen_is_visible(self):
+        self.arm_navigation()
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.clicked_decks.clear()
+        checks = iter((False, True))
+        self.controller._historic_selection_screen_verified = lambda: next(checks)
+        self.on_screen = set()
+        self.on_screen.add("R.png")
+        self.controller._click_image = lambda path, *a, **k: (
+            os.path.basename(path) in self.on_screen
+        )
+        # A stale location cache triggers navigation, but the already selected
+        # deck is recognized and never clicked a second time.
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, [])
+
     def test_nothing_is_assumed_before_the_bot_has_clicked(self):
         self.arm_navigation()
         self.on_screen = set()

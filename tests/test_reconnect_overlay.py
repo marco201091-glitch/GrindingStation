@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 from vision.vision import VisionEngine
 from vision.window_locator import WindowRect
 
@@ -20,6 +21,8 @@ class ReconnectOverlayTests(unittest.TestCase):
     def make_controller(self, width, height, *, visible=True):
         controller = Controller.__new__(Controller)
         controller._stop_requested = False
+        controller._get_state_from_log = mock.Mock(return_value=BotState.IN_GAME)
+        controller._get_state_from_log = lambda: __import__("state.state_machine", fromlist=["BotState"]).BotState.IN_GAME
         controller._reconnect_retry_after = 0.0
         controller._historic_selection_key = "old-selection"
         controller._arena_region_provider = mock.Mock()

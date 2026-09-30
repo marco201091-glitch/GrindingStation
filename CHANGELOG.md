@@ -2,6 +2,18 @@
 
 ## 1.1.0-dev — in development
 
+- Post-match dismissal and queue handoff now share one cancellable cycle per
+  match. Arena readiness is checked after a 2-second minimum and polled up to
+  15 seconds; stale callbacks cannot restart a stopped or newer session.
+- Victory/Defeat uses one Continue click at a time and preserves the required
+  10-second wait before checking or clicking again.
+- Historic and Starter share a stable, title-confirmed reward Claim path; the
+  queue leaves the screen as soon as the Reward title disappears.
+- A session reconnect monitor runs outside the queue loop, serializes its click
+  against menu navigation, and pauses game actions until Arena emits new game
+  state after reconnect.
+- Queue Play is a single click; retries wait for state evidence instead of
+  sending a second click to an unverified screen.
 - Menu state now follows the latest explicit log transition; incidental format
   and deck names no longer invent Historic/My Decks/Find Match state.
 - Match completion and unknown loading scenes invalidate prior state; the

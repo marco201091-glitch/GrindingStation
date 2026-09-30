@@ -21,13 +21,16 @@ Suite completa: 950 test eseguiti, 948 passati, 1 saltato e il solo fallimento
 preesistente sul budget dei blocchi. Dopo l'isolamento finale del test di
 acknowledgement, i 17 test mirati sono stati rieseguiti con successo.
 
+Suite completa aggiornata: 956 test, 953 passati, 1 saltato e 2 fallimenti nei test combat (`test_combat_blocks...time_budget...` e `test_combat_shadow...decision_is_recorded...`). I due test statici legacy dei report e il nuovo controllo Historic passano. I 101 test mirati sui flussi post-game, Claim, Historic, reconnect e rotazione passano. Build locale aggiornata: `GrindingStation-1.1.0-dev.exe`; il desktop resta sulla 1.0.0.
+
 ## Incrementi successivi
 
-- [ ] Coordinatore unico dei timer post-game con cancellazione e identità sessione/match.
-- [ ] Clic Play singolo con conferma ingresso in matchmaking e verifica pagina anche con mazzo in cache.
-- [ ] Reconnect indipendente dalla coda, operativo anche durante il match.
-- [ ] Claim condiviso, conferma di scomparsa e retry distanziati.
-- [ ] Sostituire i 15 s post-game aggiuntivi con verifica della UI pronta, mantenendo i 10 s obbligatori dopo Victory/Defeat.
+- [x] Coordinatore unico dei timer post-game con cancellazione e identità sessione/match.
+- [x] Clic Play singolo con conferma ingresso in matchmaking e verifica pagina anche con mazzo in cache.
+- [x] Reconnect indipendente dalla coda, operativo anche durante il match.
+- [x] Claim condiviso, conferma di scomparsa e retry distanziati.
+- [x] Sostituire i 15 s post-game aggiuntivi con verifica della UI pronta, mantenendo i 10 s obbligatori dopo Victory/Defeat.
+- [x] Ricontrollare a schermo la pagina Historic prima di riusare la selezione del mazzo memorizzata.
 - [ ] Ripresa navigazione dalla pagina corrente e backoff distinto per tipo di errore.
 - [ ] Snapshot quest per account/revisione e log meno ripetitivi.
 - [ ] Prove complete a 1366×768 e 1920×1080, Stop/Start rapido e rotazione account.

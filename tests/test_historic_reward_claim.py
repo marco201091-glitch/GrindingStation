@@ -49,8 +49,13 @@ class HistoricRewardClaimTests(unittest.TestCase):
         for width, height in ((1366, 768), (1920, 1080)):
             with self.subTest(size=(width, height)):
                 controller = self.make_controller(width, height)
+                clock = [100.0]
+                def tick():
+                    value = clock[0]
+                    clock[0] += 0.4
+                    return value
                 with mock.patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True), \
-                     mock.patch("Controller.MTGAController.Controller.time.time", return_value=100.0):
+                     mock.patch("Controller.MTGAController.Controller.time.time", side_effect=tick):
                     self.assertTrue(controller._dismiss_historic_reward_popup())
                     self.assertTrue(controller._dismiss_historic_reward_popup())
                 controller._click_abs.assert_called_once()

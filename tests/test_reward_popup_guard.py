@@ -35,6 +35,9 @@ class RewardPopupGuardTests(unittest.TestCase):
         log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
         log.close()
         self.c = Controller(log.name)
+        self.c._vision.capture = Mock(
+            side_effect=AssertionError("live screen is forbidden in Starter flow tests")
+        )
 
         # A buttons dir containing claim.png, so the os.path.exists gate passes.
         self.buttons = tempfile.mkdtemp()
@@ -68,6 +71,15 @@ class RewardPopupGuardTests(unittest.TestCase):
             return on_event_page
 
         self.c._on_starter_event_landing_page = on_landing
+        # The shared title+Claim matcher is exercised with synthetic images in
+        # test_historic_reward_claim. These flow tests only need a deterministic
+        # answer and must never capture the user's live Arena window.
+        def shared_verifier(*, click_tag):
+            if claim_at is None or on_event_page:
+                return False
+            self.c._click_abs(claim_at[0], claim_at[1], click_tag)
+            return True
+        self.c._dismiss_verified_reward_screen = Mock(side_effect=shared_verifier)
 
     def test_no_claim_button_means_no_click(self):
         self._stub_vision(claim_at=None, on_event_page=False)
@@ -94,29 +106,26 @@ class RewardPopupGuardTests(unittest.TestCase):
         self.assertEqual(self.clicks, [(CLAIM_POINT[0], CLAIM_POINT[1], "REWARD_CLAIM")])
 
     def test_guard_probe_runs_only_after_a_candidate_match(self):
-        """Ordering matters for cost: the event-page probe is an extra template
-        search on every navigation attempt, so it must run only once the claim
-        template already matched, not before."""
+        """The shared verifier owns the title/Claim decision for both modes."""
         self._stub_vision(claim_at=None, on_event_page=False)
         self.c._dismiss_reward_popup()
-        self.assertEqual(self.probed, [], "no candidate -> no extra probe")
+        self.c._dismiss_verified_reward_screen.assert_called_once_with(
+            click_tag="REWARD_CLAIM"
+        )
 
         self._stub_vision(claim_at=CLAIM_POINT, on_event_page=True)
         self.c._dismiss_reward_popup()
-        self.assertEqual(len(self.probed), 1, "candidate -> exactly one probe")
+        self.c._dismiss_verified_reward_screen.assert_called_once_with(
+            click_tag="REWARD_CLAIM"
+        )
 
     def test_claim_search_uses_the_shared_roi_constant(self):
-        """RewardRoiOverlapTests reasons about _REWARD_CLAIM_ROI, which is only
-        meaningful if the search actually uses it. Without this, reverting the call
-        site to a narrower hardcoded literal would pass the whole suite."""
+        """Starter and Historic delegate to the same guarded claim detector."""
         self._stub_vision(claim_at=None, on_event_page=False)
         self.c._dismiss_reward_popup()
-
-        self.assertEqual(len(self.locate_kwargs), 1)
-        self.assertEqual(
-            self.locate_kwargs[0].get("rel_region"), Controller._REWARD_CLAIM_ROI
+        self.c._dismiss_verified_reward_screen.assert_called_once_with(
+            click_tag="REWARD_CLAIM"
         )
-        self.assertEqual(self.locate_kwargs[0].get("confidence"), 0.80)
 
     def test_stop_requested_short_circuits(self):
         self._stub_vision(claim_at=CLAIM_POINT, on_event_page=False)
@@ -160,6 +169,7 @@ class DeckSwapRestoredTests(unittest.TestCase):
 
         # On the event landing page: the claim template matches (that IS the bug),
         # and the event Play button is genuinely there.
+        self.c._dismiss_verified_reward_screen = lambda **_kw: False
         self.c._locate_image_center_in_scaled_arena_region = (
             lambda image_path, label, **kw: CLAIM_POINT
         )
@@ -315,6 +325,10 @@ class StarterDeckNavigationFilterFallbackTests(unittest.TestCase):
         log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
         log.close()
         self.c = Controller(log.name)
+        self.c._vision.capture = Mock(
+            side_effect=AssertionError("live screen is forbidden in Starter navigation tests")
+        )
+        self.c._ensure_arena_region = lambda force_reacquire=False: (0, 0, 1920, 1080)
 
         self.buttons = tempfile.mkdtemp()
         for name in ("play_btn.png",):
@@ -697,5 +711,3 @@ class StarterDeckGridGeometryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

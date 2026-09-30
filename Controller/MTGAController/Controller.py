@@ -31,6 +31,7 @@ from Controller.Utilities.input_controller import (
 from actions.actions import run_action
 from actions import navigation_flow as nav_rois
 from actions.navigation_flow import build_post_login_navigation_actions
+from navigation.post_match import PostMatchCoordinator
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
 from vision.window_locator import (
@@ -835,7 +836,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._unknown_screen_strikes = 0
         self._post_match_ready_ts = None
         self._post_match_delay_sec = 15
+        self._post_match_coordinator = PostMatchCoordinator()
+        self._post_match_cycle = None
+        self._post_match_handoff_started = False
+        self._post_match_min_delay_sec = 2.0
+        self._post_match_max_wait_sec = 15.0
+        self._post_match_ready_streak = 0
+        self._reconnect_monitor_timer = None
+        self._reconnect_monitor_generation = 0
+        self._reconnect_recovery_pending = False
         self._historic_reward_claim_retry_after = 0.0
+        self._reward_claim_candidate_since = None
+        self._reward_claim_failures = 0
         self._reconnect_retry_after = 0.0
         self._stop_requested = False
         self._post_login_action_done = False
@@ -4231,31 +4243,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """
         if not self._starter_navigation_may_act():
             return False
-        claim_btn = os.path.join(self._buttons_dir(), "claim.png")
-        if not os.path.exists(claim_btn):
+        if not os.path.isfile(os.path.join(self._buttons_dir(), "claim.png")):
             return False
-        runtime_status.set_startup_phase("Checking for reward popups")
-        point = self._locate_image_center_in_scaled_arena_region(
-            claim_btn, "REWARD_CLAIM", rel_region=self._REWARD_CLAIM_ROI,
-            confidence=0.80, timeout=1.5,
-        )
-        if point is None or not self._starter_navigation_may_act():
-            return False
-        # Candidate match -- verify before clicking. Done only now, so the extra
-        # probe costs nothing on the common path where no claim-like button is up.
-        if self._on_starter_event_landing_page("REWARD_CLAIM_EVENT_PLAY_GUARD"):
-            bot_logger.log_info(
-                "Reward claim candidate ignored: the event Play button is visible, so this "
-                "is the event landing page and not a reward popup (clicking would start a "
-                "match with the wrong deck)."
-            )
-            return False
-        if not self._starter_navigation_may_act():
-            return False
-        self._click_abs(point[0], point[1], "REWARD_CLAIM")
-        bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
-        time.sleep(1.0)
-        return True
+        return self._dismiss_verified_reward_screen(click_tag="REWARD_CLAIM")
 
     def _dismiss_match_end_screen(self) -> bool:
         """Safety net for a DEFEAT/VICTORY result screen the post-match timer
@@ -5932,9 +5922,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         colors, forced_filename = self._quest_deck_target("Historic")
         key = self._historic_selection_key_for(colors, forced_filename)
         if self._historic_selection_key == key:
-            # Already navigated and verified for this account + quest; MTGA keeps
-            # the selection between matches, so a plain Play click re-queues it.
-            return True
+            # The selection usually survives between matches, but store, profile,
+            # and event screens can invalidate our in-memory location assumption.
+            # Recheck a live anchor before allowing the queue loop to press Play.
+            if self._historic_selection_screen_verified():
+                return True
+            bot_logger.log_info(
+                "Historic: remembered deck key is stale; selection screen is no longer visible."
+            )
+            self._historic_selection_key = None
+            self._forget_selected_deck()
         state = self._get_state_from_log()
         if state in (BotState.IN_GAME, BotState.FIND_MATCH):
             # A match is running or loading -- the screen is not ours to navigate.
@@ -6281,16 +6278,30 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 )
             )
         bot_logger.log_info("Queue attempt: clicking queue button.")
+        retry_after = getattr(self, "_queue_click_retry_after", 0.0)
+        if time.time() < retry_after:
+            return
         bot_logger.log_click(target[0], target[1], "QUEUE_BUTTON")
         runtime_status.touch_input("QUEUE_BUTTON", target)
-        self.input.move_abs(target[0], target[1])
-        self.input.left_down()
-        time.sleep(0.2)
-        self.input.left_up()
-        time.sleep(1)
-        self.input.left_down()
-        time.sleep(0.2)
-        self.input.left_up()
+        transaction = getattr(self.input, "input_transaction", None)
+        context = transaction(timeout=0.5) if callable(transaction) else nullcontext(True)
+        with context as acquired:
+            if not acquired or self._stop_requested:
+                return
+            self.input.move_abs(target[0], target[1])
+            self.input.left_down()
+            time.sleep(0.2)
+            self.input.left_up()
+        self._queue_click_retry_after = time.time() + 3.0
+        time.sleep(0.4)
+        state_after_click = self._get_state_from_log()
+        if state_after_click in (BotState.FIND_MATCH, BotState.IN_GAME):
+            self._queue_click_retry_after = 0.0
+            bot_logger.log_info(f"Queue accepted; state={state_after_click}.")
+        else:
+            bot_logger.log_info(
+                f"Queue click sent once; awaiting matchmaking evidence (state={state_after_click})."
+            )
 
     def start_monitor(self) -> None:
         self.log_reader.start_log_monitor()
@@ -6305,6 +6316,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         session is starting' an explicit act of the start path, instead of a side
         effect buried in a quest helper -- and makes it a no-op to call twice."""
         self._stop_requested = False
+        self._invalidate_post_match_cycle("new session")
+        self._stop_reconnect_monitor()
         # Nothing is known about what the user (or a previous session) left
         # selected in MTGA, so the first Historic queue of a session must
         # navigate and select explicitly rather than trust the Play button.
@@ -6354,6 +6367,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_info(f"Account play order active: {self._account_play_order}")
             bot_logger.log_info(f"Account play order next index: {self._account_cycle_index}")
         self.start_monitor()
+        self._start_reconnect_monitor()
         self.start_queueing()
 
     def dismiss_remote_request(self) -> None:
@@ -6373,6 +6387,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def end_game(self) -> None:
         self._stop_requested = True
+        self._invalidate_post_match_cycle("Stop")
+        self._stop_reconnect_monitor()
         self.__clear_cast_ack_attempts("bot_stopped")
         self.__concede_outcome = "stop_requested"
         self.__concede_completed_event.set()
@@ -9044,6 +9060,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """
         if self._stop_requested or self._suppress_selections:
             return False
+        if getattr(self, "_reconnect_recovery_pending", False):
+            return False
         if getattr(self, "_Controller__concession_claimed", False):
             return False
         return self.__is_live_match(expected_match_id)
@@ -10005,9 +10023,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._click_abs(ok_x, ok_y, f"{label}_OKAY_FALLBACK")
 
     def dismiss_end_screen(self):
-        """Click to dismiss match end screen and return to main menu"""
+        """Dismiss results, then start one cancellable post-match cycle."""
         if self._stop_requested:
             bot_logger.log_info("Dismiss end screen skipped: stop requested.")
+            return
+        cycle = getattr(self, "_post_match_cycle", None)
+        if cycle is not None and not self._post_match_coordinator.current(cycle):
             return
         if focus_mtga_window():
             bot_logger.log_info("Dismiss end screen: focused MTGA window before click.")
@@ -10032,9 +10053,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             continue_x = center_x
             continue_y = int(self.screen_bounds[0][1] + (self.screen_bounds[1][1] - self.screen_bounds[0][1]) * 0.93)
             source = f"screen_bounds_center screen_bounds={self.screen_bounds}"
-        bot_logger.log_info(f"Dismiss end screen: clicking {source} center=({center_x}, {center_y}) continue=({continue_x}, {continue_y})")
-        bot_logger.log_click(center_x, center_y, "DISMISS_END_SCREEN")
-        runtime_status.touch_input("DISMISS_END_SCREEN", (center_x, center_y))
+        bot_logger.log_info(f"Dismiss end screen: client={source}; first Continue target=({continue_x}, {continue_y})")
         # Arena may take several seconds to return to Home after Continue. A
         # second click during that transition can land on Store or another tab.
         # Wait after each click, then accept either the visual Home anchor or a
@@ -10042,21 +10061,26 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         advanced = False
         for attempt in range(1, 7):
             if self._stop_requested:
-                break
+                return
+            if cycle is not None and not self._post_match_coordinator.current(cycle):
+                bot_logger.log_info("Dismiss end screen cancelled: match flow was superseded.")
+                return
             if self._match_end_screen_cleared():
                 advanced = True
                 break
-            tx, ty = (continue_x, continue_y) if attempt % 2 else (center_x, center_y)
+            tx, ty = continue_x, continue_y
             self.input.move_abs(tx, ty)
             time.sleep(0.25)
             if self._stop_requested:
-                break
+                return
             self.input.left_click(1)
+            bot_logger.log_click(tx, ty, "DISMISS_END_SCREEN_CONTINUE")
+            runtime_status.touch_input("DISMISS_END_SCREEN_CONTINUE", (tx, ty))
             # The post-match hold starts after dismissal; this separate grace
             # period protects the result-to-Home animation itself.
             time.sleep(10.0)
             if self._stop_requested:
-                break
+                return
             if self._match_end_screen_cleared():
                 advanced = True
                 bot_logger.log_info(f"Match completed - dismissed end screen (confirmed after {attempt} attempt(s))")
@@ -10086,7 +10110,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # delta self-corrects once it does, and the Home reads also refresh it.
         self._update_gold_from_inventory()
         self._note_match_finished()
-        threading.Timer(self._post_match_delay_sec, self._maybe_post_match_action).start()
+        if cycle is None:
+            cycle = self._begin_post_match_cycle()
+        self._schedule_post_match_action(
+            cycle, getattr(self, "_post_match_min_delay_sec", 2.0)
+        )
         if self._queue_ready:
             self._maybe_post_match_action()
 
@@ -10118,6 +10146,43 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         now = time.time()
         self._post_match_ready_ts = now
         self._queue_progress_ts = now
+
+    def _post_match_coordinator_for_session(self):
+        coordinator = getattr(self, "_post_match_coordinator", None)
+        if coordinator is None:
+            coordinator = PostMatchCoordinator()
+            self._post_match_coordinator = coordinator
+        return coordinator
+
+    def _home_navigation_lock_for_input(self):
+        lock = getattr(self, "_home_navigation_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._home_navigation_lock = lock
+        return lock
+
+    def _begin_post_match_cycle(self) -> int:
+        coordinator = self._post_match_coordinator_for_session()
+        cycle = coordinator.begin()
+        self._post_match_cycle = cycle
+        self._post_match_handoff_started = False
+        self._queue_click_retry_after = 0.0
+        self._post_match_ready_streak = 0
+        return cycle
+
+    def _invalidate_post_match_cycle(self, reason: str) -> None:
+        coordinator = getattr(self, "_post_match_coordinator", None)
+        if coordinator is not None:
+            coordinator.invalidate()
+        self._post_match_cycle = None
+        self._post_match_ready_ts = None
+        self._post_match_handoff_started = False
+        self._post_match_ready_streak = 0
+
+    def _schedule_post_match_action(self, cycle: int, delay: float) -> bool:
+        return self._post_match_coordinator_for_session().schedule(
+            cycle, "handoff", delay, self._maybe_post_match_action,
+        )
 
     def _match_end_screen_cleared(self) -> bool:
         """True once we are back on a recognizable Arena screen after a match.
@@ -10404,6 +10469,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         current_state = self._get_state_from_log()
         runtime_status.touch_playerlog_event(state=str(current_state))
         if pattern == self.patterns["game_state"]:
+            if getattr(self, "_reconnect_recovery_pending", False):
+                self._reconnect_recovery_pending = False
+                self._reconnect_retry_after = 0.0
+                bot_logger.log_info("Reconnect confirmed: Arena resumed sending game state.")
+            if getattr(self, "_post_match_handoff_started", False):
+                self._invalidate_post_match_cycle("new match entered")
+                self._match_end_dismissed = False
+                self._post_match_main_nav_loaded = False
             self.__update_game_state(json.loads(line_containing_pattern))
             if self._queue_spam_thread and self._queue_spam_thread.is_alive():
                 self._stop_queue_spam = True
@@ -10413,6 +10486,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__update_game_state(json.loads(line_containing_pattern))
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
+            post_match_cycle = self._begin_post_match_cycle()
             self.__concede_outcome = "match_completed"
             completed_match_id = self.__live_match_id or self.__last_seen_match_id
             if self.__concession_claim_reason and completed_match_id:
@@ -10458,13 +10532,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._post_match_main_nav_loaded = False
             self._post_match_ready_ts = None
             # Wait a moment for end screen to fully appear, then dismiss it
-            threading.Timer(6.0, self.dismiss_end_screen).start()
+            self._post_match_coordinator.schedule(
+                post_match_cycle, "dismiss", 6.0,
+                lambda: self.dismiss_end_screen(),
+            )
             if self._account_switch_due():
                 self._account_switch_pending = True
         elif pattern == self.patterns["queue_ready_marker"]:
             self._set_runtime_home_mode("queue_ready")
             self._handle_queue_ready()
         elif pattern == self.patterns["main_nav_loaded"]:
+            if getattr(self, "_reconnect_recovery_pending", False):
+                self._reconnect_recovery_pending = False
+                self._reconnect_retry_after = 0.0
             self.__leave_live_match("MainNav", outcome="left_match")
             if self._account_switch_in_progress:
                 self._set_runtime_home_mode("account_switch")
@@ -10672,6 +10752,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """Stop the bot from inside the controller (e.g. round complete)."""
         bot_logger.log_info(f"Bot stop requested by controller: {reason}.")
         self._stop_requested = True
+        self._invalidate_post_match_cycle("controller stop")
+        self._stop_reconnect_monitor()
         self._stop_queue_spam = True
         self._account_switch_pending = False
         try:
@@ -10931,7 +11013,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         bot_logger.log_info("MainNav loaded.")
         if not self._queue_ready:
             return
-        time.sleep(1.5)
         if self._account_switch_in_progress:
             return
         if self._match_end_dismissed:
@@ -10942,18 +11023,49 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return
         if self._account_switch_in_progress:
             return
+        cycle = getattr(self, "_post_match_cycle", None)
+        coordinator = self._post_match_coordinator_for_session()
+        if cycle is None or not coordinator.current(cycle):
+            return
+        if getattr(self, "_post_match_handoff_started", False):
+            return
         if self._post_match_ready_ts is None:
+            return
+        queue_thread = getattr(self, "_queue_spam_thread", None)
+        if queue_thread is not None and queue_thread.is_alive() and getattr(self, "_stop_queue_spam", False):
+            self._schedule_post_match_action(cycle, 0.5)
             return
         runtime_status.set_mode("post_match", bot_state=str(self._get_state_from_log()))
         elapsed = time.time() - self._post_match_ready_ts
-        if elapsed < self._post_match_delay_sec:
-            remaining = self._post_match_delay_sec - elapsed
-            bot_logger.log_info(f"Post-match delay active ({remaining:.1f}s remaining).")
-            runtime_status.set_intentional_wait(remaining + 0.2, "post_match_delay")
-            # Ensure we re-check when the delay elapses to avoid getting stuck at ~0s.
-            threading.Timer(max(0.1, remaining + 0.1), self._maybe_post_match_action).start()
+        minimum = getattr(self, "_post_match_min_delay_sec", 2.0)
+        if elapsed < minimum:
+            remaining = minimum - elapsed
+            runtime_status.set_intentional_wait(remaining + 0.1, "post_match_ui_settle")
+            self._schedule_post_match_action(cycle, remaining + 0.1)
             return
+        screen_ready = self._post_match_main_nav_loaded or self._post_match_screen_ready()
+        if screen_ready:
+            self._post_match_ready_streak = getattr(self, "_post_match_ready_streak", 0) + 1
+            if self._post_match_ready_streak < 2:
+                runtime_status.set_intentional_wait(0.55, "confirming_post_match_ui")
+                self._schedule_post_match_action(cycle, 0.45)
+                return
+        else:
+            self._post_match_ready_streak = 0
+            maximum = getattr(self, "_post_match_max_wait_sec", 15.0)
+            if elapsed < maximum:
+                runtime_status.set_intentional_wait(0.85, "waiting_for_post_match_ui")
+                self._schedule_post_match_action(cycle, 0.75)
+                return
+            bot_logger.log_error(
+                "Post-match UI did not become recognizable within {:.0f}s; "
+                "continuing to the guarded queue recovery.".format(maximum)
+            )
         runtime_status.clear_intentional_wait()
+        if not coordinator.current(cycle) or self._stop_requested:
+            return
+        if not self._claim_post_match_handoff(cycle):
+            return
         if self._account_switch_pending or self._account_switch_due():
             bot_logger.log_info("Post-match UI ready; starting account switch.")
             threading.Thread(target=self._perform_account_switch, daemon=True).start()
@@ -10966,14 +11078,54 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         bot_logger.log_info("Post-match UI ready; resuming queue spam.")
         self.start_queueing()
 
+    def _post_match_screen_ready(self) -> bool:
+        """Recognize a stable normal Arena screen; result/loading screens fail."""
+        if self._stop_requested:
+            return False
+        try:
+            detector = getattr(self, "_arena_region_provider", None)
+            if detector is None:
+                return False
+            observed = detector.detect(write_debug_on_fail=False)
+            if observed is not None and observed.ok:
+                return True
+            header = self._app_path("assets", "assert", "reward_header.png")
+            if os.path.isfile(header):
+                point = self._locate_image_center_in_scaled_arena_region(
+                    header, "POST_MATCH_REWARD_READY",
+                    rel_region=(520, 35, 820, 220), confidence=0.82,
+                    timeout=0.8,
+                )
+                return point is not None
+            return False
+        except Exception as exc:
+            bot_logger.log_error(f"Post-match screen probe failed: {exc}")
+            return False
+
+    def _claim_post_match_handoff(self, cycle: int) -> bool:
+        lock = getattr(self, "_post_match_handoff_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._post_match_handoff_lock = lock
+        with lock:
+            if (self._stop_requested
+                    or not self._post_match_coordinator_for_session().current(cycle)
+                    or getattr(self, "_post_match_handoff_started", False)):
+                return False
+            self._post_match_handoff_started = True
+            return True
+
     def should_defer_post_match_actions(self) -> bool:
         if self._account_switch_in_progress:
             return True
         if self._account_switch_pending or self._account_switch_due():
             return True
-        if self._post_match_ready_ts is None:
-            return False
-        return (time.time() - self._post_match_ready_ts) < self._post_match_delay_sec
+        cycle = getattr(self, "_post_match_cycle", None)
+        return (
+            cycle is not None
+            and self._post_match_coordinator_for_session().current(cycle)
+            and not getattr(self, "_post_match_handoff_started", False)
+        )
 
     def start_queueing(self) -> None:
         # Atomic check-and-create so two racing callers can't both spawn a queue
@@ -11171,12 +11323,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         Claim alone also resembles the orange Play button; require the Reward
         title in a separate region before touching any input.
         """
-        if getattr(self, "_game_mode", None) != "historic" or self._stop_requested:
+        if self._stop_requested:
             return False
-        if time.time() < getattr(self, "_historic_reward_claim_retry_after", 0.0):
-            return True
         if self._get_state_from_log() in (BotState.FIND_MATCH, BotState.IN_GAME):
             return False
+        return self._dismiss_verified_reward_screen(click_tag="HISTORIC_REWARD_CLAIM")
+
+    def _dismiss_verified_reward_screen(self, *, click_tag: str) -> bool:
+        """Claim only a stable Reward title + Claim pair; hold navigation until gone."""
+        now = time.time()
+        retry_after = getattr(self, "_historic_reward_claim_retry_after", 0.0)
         header = os.path.join(self._resource_root_dir(), "assets", "assert", "reward_header.png")
         claim = os.path.join(self._buttons_dir(), "claim.png")
         if not os.path.isfile(header) or not os.path.isfile(claim):
@@ -11203,23 +11359,60 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return None
                 return self._vision.find_template(frame, path, threshold=0.85, scales=scales)
 
-            if locate(header, header_roi) is None:
+            if now < retry_after:
+                if locate(header, header_roi) is not None:
+                    return True
+                self._historic_reward_claim_retry_after = 0.0
+                self._reward_claim_candidate_since = None
+                self._reward_claim_failures = 0
                 return False
-            # A verified reward screen owns navigation until it is claimed.
+            if locate(header, header_roi) is None:
+                self._reward_claim_candidate_since = None
+                self._reward_claim_failures = 0
+                return False
+            # Title without Claim is a loading/animation frame; it still owns UI.
+            button = locate(claim, claim_roi)
+            if button is None:
+                self._reward_claim_candidate_since = None
+                return True
+            if self._stop_requested:
+                return True
+            if getattr(self, "_reward_claim_candidate_since", None) is None:
+                self._reward_claim_candidate_since = now
+                bot_logger.log_info("Reward popup detected; waiting for its Claim button to settle.")
+                return True
+            if now - self._reward_claim_candidate_since < 0.35:
+                return True
+            # The result popup owns the UI until claimed; recheck both templates
+            # after focus and serialize the physical click with other input paths.
             if not focus_mtga_window() or self._stop_requested:
                 return True
             if locate(header, header_roi) is None:
+                self._reward_claim_candidate_since = None
                 return True
             button = locate(claim, claim_roi)
             if button is None:
                 return True
             point = (claim_roi[0] + button.x, claim_roi[1] + button.y)
+            transaction = getattr(getattr(self, "input", None), "input_transaction", None)
+            context = transaction(timeout=0.5) if callable(transaction) else nullcontext(True)
+            with context as acquired:
+                if not acquired or self._stop_requested:
+                    return True
+                # Last visual check belongs immediately before the click.
+                if locate(header, header_roi) is None or locate(claim, claim_roi) is None:
+                    self._reward_claim_candidate_since = None
+                    return True
+                self._click_abs(point[0], point[1], click_tag)
             self._historic_reward_claim_retry_after = time.time() + 5.0
+            self._reward_claim_failures = getattr(self, "_reward_claim_failures", 0) + 1
+            if self._reward_claim_failures >= 3:
+                self._historic_reward_claim_retry_after = time.time() + 15.0
+                bot_logger.log_error("Reward Claim remains visible after repeated attempts; pausing before retry.")
             self._historic_selection_key = None
             self._historic_selection_retry_ts = 0.0
             self._historic_selection_failures = 0
-            bot_logger.log_info(f"Historic reward: clicking verified Claim at {point}.")
-            self._click_abs(point[0], point[1], "HISTORIC_REWARD_CLAIM")
+            bot_logger.log_info(f"Reward popup: clicked stable, verified Claim at {point} ({click_tag}).")
             return True
         except Exception as exc:
             bot_logger.log_error(f"Historic reward probe failed: {exc}")
@@ -11234,6 +11427,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """
         if self._stop_requested:
             return True
+        state = self._get_state_from_log()
+        if state not in (BotState.IN_GAME, BotState.FIND_MATCH, BotState.UNKNOWN):
+            return False
         if time.time() < getattr(self, "_reconnect_retry_after", 0.0):
             return True
         template = os.path.join(self._resource_root_dir(), "assets", "assert", "reconnect_button.png")
@@ -11272,21 +11468,74 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 roi[0] + int(round(match.x * roi[2] / 1220)),
                 roi[1] + int(round(match.y * roi[3] / 460)),
             )
+            self._reconnect_recovery_pending = True
             self._reconnect_retry_after = time.time() + 15.0
             self._historic_selection_key = None
             bot_logger.log_info(f"Arena disconnected: clicking Reconnect at {point}; waiting for reload.")
-            self._click_abs(point[0], point[1], "RECONNECT")
+            transaction = getattr(getattr(self, "input", None), "input_transaction", None)
+            context = transaction(timeout=0.5) if callable(transaction) else nullcontext(True)
+            with context as acquired:
+                if not acquired or self._stop_requested:
+                    return True
+                if visible_button() is None:
+                    return True
+                self._click_abs(point[0], point[1], "RECONNECT")
             return True
         except Exception as exc:
+            self._reconnect_recovery_pending = False
             bot_logger.log_error(f"Reconnect probe failed: {exc}")
             return False
 
+    def _start_reconnect_monitor(self) -> None:
+        self._stop_reconnect_monitor()
+        if self._stop_requested:
+            return
+        generation = self._reconnect_monitor_generation
+        self._schedule_reconnect_probe(generation, 8.0)
+
+    def _stop_reconnect_monitor(self) -> None:
+        self._reconnect_monitor_generation = getattr(
+            self, "_reconnect_monitor_generation", 0
+        ) + 1
+        timer = getattr(self, "_reconnect_monitor_timer", None)
+        self._reconnect_monitor_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _schedule_reconnect_probe(self, generation: int, delay: float) -> None:
+        if self._stop_requested or generation != self._reconnect_monitor_generation:
+            return
+        timer = threading.Timer(delay, self._reconnect_monitor_tick, args=(generation,))
+        timer.daemon = True
+        self._reconnect_monitor_timer = timer
+        timer.start()
+
+    def _reconnect_monitor_tick(self, generation: int) -> None:
+        if self._stop_requested or generation != self._reconnect_monitor_generation:
+            return
+        try:
+            with self._home_navigation_lock_for_input():
+                handled = self._handle_disconnect_overlay()
+            if handled and getattr(self, "_reconnect_recovery_pending", False):
+                self._schedule_reconnect_probe(generation, 3.0)
+                return
+        except Exception as exc:
+            bot_logger.log_error(f"Reconnect monitor failed: {exc}")
+        self._schedule_reconnect_probe(generation, 8.0)
+
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
-            if self._handle_disconnect_overlay():
+            with self._home_navigation_lock_for_input():
+                disconnected = self._handle_disconnect_overlay()
+            if disconnected:
                 time.sleep(3.0)
                 continue
-            if self._dismiss_historic_reward_popup():
+            with self._home_navigation_lock_for_input():
+                reward_owned = self._dismiss_historic_reward_popup()
+            if reward_owned:
                 time.sleep(3.0)
                 continue
             if self._account_switch_in_progress:
